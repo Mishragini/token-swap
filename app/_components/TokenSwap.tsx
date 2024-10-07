@@ -1,7 +1,6 @@
-'use client';
-
+'use client'
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { ArrowDownIcon } from 'lucide-react';
+import { ArrowDownIcon, Loader2 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,7 +16,7 @@ import {
 import { Search } from "lucide-react";
 import axios from 'axios';
 import { useToast } from '@/hooks/use-toast';
-import { LAMPORTS_PER_SOL, VersionedTransaction } from '@solana/web3.js';
+import { VersionedTransaction } from '@solana/web3.js';
 
 interface Token {
     address: string;
@@ -37,6 +36,12 @@ export default function TokenSwap() {
     const [dialogOpen, setDialogOpen] = useState(false);
     const quoteRespRef = useRef(null);
 
+    // Loading states
+    const [isLoadingTokens, setIsLoadingTokens] = useState(true);
+    const [isLoadingQuote, setIsLoadingQuote] = useState(false);
+    const [isSwapping, setIsSwapping] = useState(false);
+    const [quoteError, setQuoteError] = useState<string | null>(null);
+
     const [inputToken, setInputToken] = useState<Token>({
         address: 'So11111111111111111111111111111111111111112',
         symbol: 'SOL',
@@ -53,40 +58,53 @@ export default function TokenSwap() {
     useEffect(() => {
         setMounted(true);
         const fetchTokens = async () => {
+            setIsLoadingTokens(true);
             try {
                 const response = await axios.get<Token[]>('https://token.jup.ag/strict');
                 setTokens(response.data);
             } catch (error) {
-                console.error('Error fetching tokens:', error);
+                toast({
+                    variant: "destructive",
+                    title: "Error fetching tokens",
+                    description: `${error}`,
+                    duration: 2000,
+                });
+            } finally {
+                setIsLoadingTokens(false);
             }
         };
         fetchTokens();
     }, []);
 
+    // Debounced quote fetching
     useEffect(() => {
+        let timeoutId: NodeJS.Timeout;
+
         if (inputToken && outputToken && parseFloat(sellAmount) > 0) {
-            const getQuote = async () => {
+            setIsLoadingQuote(true);
+            setQuoteError(null);
+
+            timeoutId = setTimeout(async () => {
                 try {
-                    const response = await axios.get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputToken.address}&outputMint=${outputToken.address}&amount=${parseFloat(sellAmount) * Math.pow(10, inputToken.decimals)}&slippageBps=50`);
+                    const response = await axios.get(
+                        `https://quote-api.jup.ag/v6/quote?inputMint=${inputToken.address}&outputMint=${outputToken.address}&amount=${parseFloat(sellAmount) * Math.pow(10, inputToken.decimals)}&slippageBps=50`
+                    );
                     const quoteResponse = response.data;
-
                     quoteRespRef.current = quoteResponse;
-
                     const outAmount = quoteResponse.outAmount / Math.pow(10, outputToken.decimals);
                     setBuyAmount(outAmount.toString());
                 } catch (e) {
-                    toast({
-                        variant: "destructive",
-                        title: "Could not get the quote.",
-                        description: "Please make sure the fields selected are correct",
-                        duration: 2000,
-                    });
+                    console.log(e);
+                    setQuoteError("Could not get quote. Please verify your inputs.");
+                    setBuyAmount('0');
+                } finally {
+                    setIsLoadingQuote(false);
                 }
-            };
-            getQuote();
+            }, 500);
         }
-    }, [inputToken, outputToken, sellAmount]);
 
+        return () => clearTimeout(timeoutId);
+    }, [inputToken, outputToken, sellAmount]);
 
     const filteredTokens = tokens.filter(token =>
         token.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -94,11 +112,9 @@ export default function TokenSwap() {
     );
 
     const handleTokenSelect = (token: Token) => {
-        console.log(handleTokenSelect)
         if (isSelectingInput) {
             setInputToken(token);
         } else {
-            console.log(token);
             setOutputToken(token);
         }
         setDialogOpen(false);
@@ -125,6 +141,7 @@ export default function TokenSwap() {
             return;
         }
 
+        setIsSwapping(true);
         try {
             const quoteResp = quoteRespRef.current;
             if (!quoteResp) {
@@ -139,7 +156,6 @@ export default function TokenSwap() {
             const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
             const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
 
-
             const signedTx = await wallet.signTransaction(transaction);
             const latestBlockHash = await connection.getLatestBlockhash();
             const rawTransaction = signedTx.serialize();
@@ -148,40 +164,52 @@ export default function TokenSwap() {
                 maxRetries: 2,
             });
 
+            toast({
+                variant: "default",
+                title: "Transaction submitted",
+                description: "Waiting for confirmation...",
+                duration: 2000,
+            });
+
             await connection.confirmTransaction({
                 blockhash: latestBlockHash.blockhash,
                 lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
                 signature: txid,
             });
 
-            console.log(`Transaction successful: https://solscan.io/tx/${txid}`);
             toast({
                 variant: "default",
                 title: "Swap successful!",
                 description: `Transaction ID: ${txid}`,
                 duration: 3000,
             });
-            return txid;
 
-        } catch (error: any) {
+            // Reset amounts after successful swap
+            setSellAmount('0');
+            setBuyAmount('0');
+
+            return txid;
+        } catch (error) {
             console.error('Swap failed:', error);
             toast({
                 variant: "destructive",
                 title: "Swap Failed",
-                description: error.message || "An error occurred during the swap.",
+                description: "An error occurred during the swap.",
                 duration: 2000,
             });
+        } finally {
+            setIsSwapping(false);
         }
     }, [wallet.publicKey, connection, inputToken, outputToken, sellAmount]);
 
     if (!mounted) return null;
 
     return (
-        <div className='bg-black p-4'>
+        <div className='bg-black h-screen p-4'>
             <div className='flex justify-end w-full'>
                 <WalletMultiButton />
             </div>
-            <div className="text-white h-screen flex flex-col items-center justify-center">
+            <div className="text-white flex flex-col items-center justify-center mt-[200px]">
                 <div className="text-center mb-8">
                     <h1 className="text-5xl font-bold mb-2">Swap anytime,</h1>
                     <h1 className="text-5xl font-bold">anywhere.</h1>
@@ -200,6 +228,7 @@ export default function TokenSwap() {
                                     value={sellAmount}
                                     onChange={(e) => setSellAmount(e.target.value)}
                                     className="bg-zinc-800 border-none text-2xl text-zinc-400"
+                                    disabled={isSwapping}
                                 />
                                 <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
                                     <DialogTrigger asChild>
@@ -207,6 +236,7 @@ export default function TokenSwap() {
                                             variant="outline"
                                             onClick={() => setIsSelectingInput(true)}
                                             className="w-[140px] bg-white border-none flex items-center gap-2"
+                                            disabled={isSwapping}
                                         >
                                             {inputToken.logoURI && (
                                                 <img
@@ -232,21 +262,27 @@ export default function TokenSwap() {
                                             />
                                         </div>
                                         <div className="max-h-[300px] overflow-y-auto">
-                                            {filteredTokens.map((token) => (
-                                                <Button
-                                                    key={token.address}
-                                                    variant="ghost"
-                                                    className="w-full justify-start mb-2 text-white hover:bg-zinc-800"
-                                                    onClick={() => handleTokenSelect(token)}
-                                                >
-                                                    <img
-                                                        src={token.logoURI || '/api/placeholder/24/24'}
-                                                        alt={token.symbol}
-                                                        className="w-6 h-6 rounded-full mr-2"
-                                                    />
-                                                    <span>{token.symbol}</span>
-                                                </Button>
-                                            ))}
+                                            {isLoadingTokens ? (
+                                                <div className="flex justify-center py-4">
+                                                    <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+                                                </div>
+                                            ) : (
+                                                filteredTokens.map((token) => (
+                                                    <Button
+                                                        key={token.address}
+                                                        variant="ghost"
+                                                        className="w-full justify-start mb-2 text-white hover:bg-zinc-800"
+                                                        onClick={() => handleTokenSelect(token)}
+                                                    >
+                                                        <img
+                                                            src={token.logoURI || '/api/placeholder/24/24'}
+                                                            alt={token.symbol}
+                                                            className="w-6 h-6 rounded-full mr-2"
+                                                        />
+                                                        <span>{token.symbol}</span>
+                                                    </Button>
+                                                ))
+                                            )}
                                         </div>
                                     </DialogContent>
                                 </Dialog>
@@ -264,6 +300,12 @@ export default function TokenSwap() {
                         <div className="space-y-3">
                             <div className="flex items-center justify-between">
                                 <span className="text-sm text-zinc-400">Buy</span>
+                                {isLoadingQuote && (
+                                    <span className="text-sm text-zinc-400 flex items-center gap-2">
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        Fetching quote...
+                                    </span>
+                                )}
                             </div>
                             <div className="flex gap-2">
                                 <Input
@@ -277,6 +319,7 @@ export default function TokenSwap() {
                                         <Button
                                             onClick={() => setIsSelectingInput(false)}
                                             className="w-[140px] bg-purple-600 hover:bg-purple-700 border-none text-white"
+                                            disabled={isSwapping}
                                         >
                                             {outputToken ? (
                                                 <div className="flex items-center gap-2">
@@ -306,34 +349,56 @@ export default function TokenSwap() {
                                             />
                                         </div>
                                         <div className="max-h-[300px] overflow-y-auto">
-                                            {filteredTokens.map((token) => (
-                                                <Button
-                                                    key={token.address}
-                                                    variant="ghost"
-                                                    className="w-full justify-start mb-2 text-white hover:bg-zinc-800"
-                                                    onClick={() => handleTokenSelect(token)}
-                                                >
-                                                    <img
-                                                        src={token.logoURI || '/api/placeholder/24/24'}
-                                                        alt={token.symbol}
-                                                        className="w-6 h-6 rounded-full mr-2"
-                                                    />
-                                                    <span>{token.symbol}</span>
-                                                </Button>
-                                            ))}
+                                            {isLoadingTokens ? (
+                                                <div className="flex justify-center py-4">
+                                                    <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+                                                </div>
+                                            ) : (
+                                                filteredTokens.map((token) => (
+                                                    <Button
+                                                        key={token.address}
+                                                        variant="ghost"
+                                                        className="w-full justify-start mb-2 text-white hover:bg-zinc-800"
+                                                        onClick={() => handleTokenSelect(token)}
+                                                    >
+                                                        <img
+                                                            src={token.logoURI || '/api/placeholder/24/24'}
+                                                            alt={token.symbol}
+                                                            className="w-6 h-6 rounded-full mr-2"
+                                                        />
+                                                        <span>{token.symbol}</span>
+                                                    </Button>
+                                                ))
+                                            )}
                                         </div>
                                     </DialogContent>
                                 </Dialog>
                             </div>
                         </div>
 
+                        {/* Quote error message */}
+                        {quoteError && (
+                            <div className="mt-2 text-red-400 text-sm text-center">
+                                {quoteError}
+                            </div>
+                        )}
+
                         {/* Swap button */}
                         <Button
                             onClick={swapTokens}
                             className="w-full mt-4 bg-purple-600 hover:bg-purple-700 text-white"
-                            disabled={!wallet.publicKey}
+                            disabled={!wallet.publicKey || isSwapping || isLoadingQuote || !!quoteError}
                         >
-                            {wallet.publicKey ? 'Swap' : 'Connect Wallet to Swap'}
+                            {!wallet.publicKey ? (
+                                'Connect Wallet to Swap'
+                            ) : isSwapping ? (
+                                <div className="flex items-center justify-center gap-2">
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    Swapping...
+                                </div>
+                            ) : (
+                                'Swap'
+                            )}
                         </Button>
 
                         {/* Footer text */}
